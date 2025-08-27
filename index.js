@@ -173,8 +173,9 @@ async function play(guild, song) {
 }
 
 // Bot events
-client.once('clientReady', () => {
+client.once('ready', async () => {
     console.log(`✅ Bot đã online: ${client.user.tag}`);
+    await deployCommands();
     // Set bot status
     client.user.setActivity('🎵 Nhạc & Thời tiết', { type: 'LISTENING' });
 });
