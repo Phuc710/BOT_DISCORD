@@ -1,16 +1,45 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
-// Tạm bỏ voice cho Windows, sẽ thêm sau khi fix dependencies
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
 const ytdl = require('ytdl-core');
 const axios = require('axios');
+const express = require('express'); // Thêm express
 require('dotenv').config();
 
 // Config từ .env
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
-const WELCOME_CHANNEL_ID = '💬𝓒𝓱𝓪𝓽'; // ID của channel welcome
+const WELCOME_CHANNEL_ID = '💬𝓒𝓱𝓪𝓽';
 const AUTO_ROLE_NAME = '🦄 AKKA LOO';
+const PORT = process.env.PORT || 3000; // Thêm PORT
+
+// Express app setup
+const app = express();
+
+// Health check endpoints
+app.get('/', (req, res) => {
+    res.json({
+        status: 'Bot is running! 🤖',
+        uptime: `${Math.floor(process.uptime())} seconds`,
+        timestamp: new Date().toISOString(),
+        bot_status: client.isReady() ? 'online' : 'starting...',
+        guilds: client.isReady() ? client.guilds.cache.size : 0
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        bot_status: client.isReady() ? 'online' : 'offline',
+        guilds: client.guilds.cache.size,
+        uptime: process.uptime(),
+        memory: process.memoryUsage()
+    });
+});
+
+app.get('/ping', (req, res) => {
+    res.send('Pong! 🏓');
+});
 
 const client = new Client({
     intents: [
@@ -77,7 +106,6 @@ async function deployCommands() {
 // Weather function
 async function getWeather(city) {
     try {
-        // Chuyển đổi tên thành phố tiếng Việt
         const cityMap = {
             'hcm': 'Ho Chi Minh City',
             'tphcm': 'Ho Chi Minh City',
@@ -176,21 +204,18 @@ async function play(guild, song) {
 client.once('ready', async () => {
     console.log(`✅ Bot đã online: ${client.user.tag}`);
     await deployCommands();
-    // Set bot status
     client.user.setActivity('🎵 Nhạc & Thời tiết', { type: 'LISTENING' });
 });
 
 // Auto role when member joins
 client.on('guildMemberAdd', async (member) => {
     try {
-        // Tìm role theo tên
         const role = member.guild.roles.cache.find(r => r.name === AUTO_ROLE_NAME);
         if (role) {
             await member.roles.add(role);
             console.log(`✅ Đã thêm role "${AUTO_ROLE_NAME}" cho ${member.user.tag}`);
         }
         
-        // Gửi tin nhắn chào mừng
         const welcomeChannel = member.guild.channels.cache.find(ch => ch.name.includes('chat') || ch.name.includes('💬'));
         if (welcomeChannel) {
             const embed = new EmbedBuilder()
@@ -234,7 +259,6 @@ client.on('interactionCreate', async (interaction) => {
         try {
             let songUrl = url;
             
-            // Kiểm tra nếu không phải YouTube URL thì search
             if (!ytdl.validateURL(url)) {
                 await interaction.editReply('❌ Vui lòng cung cấp link YouTube hợp lệ!');
                 return;
@@ -351,7 +375,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// Error handling & Auto-restart
+// Error handling
 client.on('error', (error) => {
     console.error('Client error:', error);
 });
@@ -364,7 +388,7 @@ client.on('reconnecting', () => {
     console.log('Bot reconnecting...');
 });
 
-// Keep alive function cho hosting free
+// Keep alive function
 function keepAlive() {
     setInterval(() => {
         console.log('Bot is alive! ' + new Date().toLocaleString('vi-VN'));
@@ -378,6 +402,11 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', (err) => {
     console.log('Uncaught Exception:', err);
+});
+
+// Start HTTP Server
+app.listen(PORT, () => {
+    console.log(`🌐 HTTP Server đang chạy trên port ${PORT}`);
 });
 
 // Login với retry
