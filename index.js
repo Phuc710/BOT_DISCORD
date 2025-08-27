@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, demuxProbe } = require('@discordjs/voice');
-const ytdl = require('ytdl-core');
+const ytdl = require('ytdl-core-discord');
 const ytsr = require('ytsr');
 const axios = require('axios');
 const express = require('express');
@@ -196,9 +196,9 @@ async function playMusic(guild, song) {
                 }
             }
         });
-        
-        const resource = createAudioResource(stream, {
-            inlineVolume: true
+        const probed = await demuxProbe(stream);
+        const resource = createAudioResource(probed.stream, {
+            inputType: probed.type
         });
         
         // Set volume
