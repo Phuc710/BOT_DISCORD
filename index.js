@@ -1,6 +1,7 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, demuxProbe } = require('@discordjs/voice');
-const play = require('play-dl');
+const ytdl = require('ytdl-core');
+const ytsr = require('ytsr');
 const axios = require('axios');
 const express = require('express');
 require('dotenv').config();
@@ -180,25 +181,23 @@ async function playMusic(guild, song) {
         console.log(`🎵 Đang chuẩn bị phát: ${song.title}`);
         
         // Kiểm tra lại URL trước khi phát
-        const urlCheck = play.yt_validate(song.url);
-        if (urlCheck !== 'video') {
+        if (!ytdl.validateURL(song.url)) {
             throw new Error('URL không hợp lệ!');
         }
         
-        // Tạo stream từ play-dl với các options tối ưu
-        const stream = await play.stream(song.url, { 
-            quality: 2, // Chất lượng cao
+        // Tạo stream từ ytdl với các options tối ưu
+        const stream = ytdl(song.url, {
             filter: 'audioonly',
-            seek: 0,
-            discordPlayerCompatibility: true
+            highWaterMark: 1 << 25,
+            quality: 'highestaudio',
+            requestOptions: {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            }
         });
         
-        if (!stream || !stream.stream) {
-            throw new Error('Không thể tạo stream audio!');
-        }
-        
-        const resource = createAudioResource(stream.stream, {
-            inputType: stream.type,
+        const resource = createAudioResource(stream, {
             inlineVolume: true
         });
         
@@ -228,6 +227,16 @@ async function playMusic(guild, song) {
         player.on('error', error => {
             console.error('❌ Player error:', error);
             serverQueue.textChannel?.send(`❌ Lỗi khi phát "${song.title}"! Chuyển bài tiếp theo...`);
+            serverQueue.songs.shift();
+            setTimeout(() => {
+                playMusic(guild, serverQueue.songs[0]);
+            }, 2000);
+        });
+        
+        // Xử lý lỗi stream
+        stream.on('error', error => {
+            console.error('❌ Stream error:', error);
+            serverQueue.textChannel?.send(`❌ Lỗi stream khi phát "${song.title}"! Chuyển bài tiếp theo...`);
             serverQueue.songs.shift();
             setTimeout(() => {
                 playMusic(guild, serverQueue.songs[0]);
@@ -278,56 +287,23 @@ async function searchYouTube(query) {
         console.log(`🔍 Tìm kiếm: ${query}`);
         
         // Kiểm tra xem có phải URL YouTube không
-        const urlValidation = play.yt_validate(query);
-        console.log(`✅ URL validation: ${urlValidation}`);
-        
-        if (urlValidation === 'video') {
-            // Nếu là URL YouTube hợp lệ
-            console.log('📺 Đang lấy thông tin video...');
-            const info = await play.video_info(query);
+        if (ytdl.validateURL(query)) {
+            console.log('📺 Đang lấy thông tin video từ URL...');
             
-            if (!info || !info.video_details) {
-                throw new Error('Không thể lấy thông tin video từ URL này!');
-            }
-            
-            return {
-                title: info.video_details.title || 'Unknown Title',
-                url: info.video_details.url || query,
-                duration: formatDuration(info.video_details.durationInSec || 0),
-                thumbnail: info.video_details.thumbnails?.[0]?.url,
-                channel: info.video_details.channel?.name || 'Unknown Channel'
-            };
-        } else {
-            // Tìm kiếm theo tên
-            console.log('🔎 Đang tìm kiếm trên YouTube...');
-            const searched = await play.search(query, { 
-                limit: 3,
-                source: { youtube: "video" }
-            });
-            
-            if (!searched || searched.length === 0) {
-                throw new Error(`Không tìm thấy bài hát nào với từ khóa: "${query}"`);
-            }
-            
-            const video = searched[0];
-            console.log(`✅ Tìm thấy: ${video.title}`);
-            
-            return {
-                title: video.title || 'Unknown Title',
-                url: video.url,
-                duration: formatDuration(video.durationInSec || 0),
-                thumbnail: video.thumbnails?.[0]?.url,
-                channel: video.channel?.name || 'Unknown Channel'
-            };
-        }
-    } catch (error) {
-        console.error('❌ Search error:', error.message);
-        
-        // Thử tìm kiếm bằng cách khác nếu URL fail
-        if (query.includes('youtube.com') || query.includes('youtu.be')) {
             try {
-                console.log('🔄 Thử phương pháp tìm kiếm khác...');
-                // Extract video ID từ URL
+                const info = await ytdl.getInfo(query);
+                
+                return {
+                    title: info.videoDetails.title || 'Unknown Title',
+                    url: info.videoDetails.video_url || query,
+                    duration: formatDuration(parseInt(info.videoDetails.lengthSeconds) || 0),
+                    thumbnail: info.videoDetails.thumbnails?.[0]?.url,
+                    channel: info.videoDetails.author?.name || 'Unknown Channel'
+                };
+            } catch (ytdlError) {
+                console.error('❌ ytdl error:', ytdlError.message);
+                
+                // Fallback: Extract video ID and reconstruct URL
                 let videoId = '';
                 if (query.includes('v=')) {
                     videoId = query.split('v=')[1].split('&')[0];
@@ -336,22 +312,48 @@ async function searchYouTube(query) {
                 }
                 
                 if (videoId) {
-                    const newUrl = `https://www.youtube.com/watch?v=${videoId}`;
-                    const info = await play.video_info(newUrl);
+                    const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
+                    const retryInfo = await ytdl.getInfo(cleanUrl);
                     
                     return {
-                        title: info.video_details.title || 'Unknown Title',
-                        url: newUrl,
-                        duration: formatDuration(info.video_details.durationInSec || 0),
-                        thumbnail: info.video_details.thumbnails?.[0]?.url,
-                        channel: info.video_details.channel?.name || 'Unknown Channel'
+                        title: retryInfo.videoDetails.title || 'Unknown Title',
+                        url: cleanUrl,
+                        duration: formatDuration(parseInt(retryInfo.videoDetails.lengthSeconds) || 0),
+                        thumbnail: retryInfo.videoDetails.thumbnails?.[0]?.url,
+                        channel: retryInfo.videoDetails.author?.name || 'Unknown Channel'
                     };
                 }
-            } catch (retryError) {
-                console.error('❌ Retry failed:', retryError.message);
+                throw ytdlError;
             }
+        } else {
+            // Tìm kiếm theo tên bằng ytsr
+            console.log('🔎 Đang tìm kiếm trên YouTube...');
+            const searchResults = await ytsr(query, { limit: 5 });
+            
+            if (!searchResults || !searchResults.items || searchResults.items.length === 0) {
+                throw new Error(`Không tìm thấy bài hát nào với từ khóa: "${query}"`);
+            }
+            
+            // Lọc chỉ lấy video (không phải playlist hay channel)
+            const videos = searchResults.items.filter(item => item.type === 'video' && item.duration);
+            
+            if (videos.length === 0) {
+                throw new Error('Không tìm thấy video nào phù hợp!');
+            }
+            
+            const video = videos[0];
+            console.log(`✅ Tìm thấy: ${video.title}`);
+            
+            return {
+                title: video.title || 'Unknown Title',
+                url: video.url,
+                duration: video.duration || 'Unknown',
+                thumbnail: video.bestThumbnail?.url || video.thumbnails?.[0]?.url,
+                channel: video.author?.name || 'Unknown Channel'
+            };
         }
-        
+    } catch (error) {
+        console.error('❌ Search error:', error.message);
         throw new Error(`Không thể tìm thấy hoặc phát bài hát này! Lỗi: ${error.message}`);
     }
 }
@@ -371,17 +373,6 @@ function formatDuration(seconds) {
 // Bot events
 client.once('ready', async () => {
     console.log(`✅ Bot đã online: ${client.user.tag}`);
-    
-    // Initialize play-dl
-    try {
-        await play.setToken({
-            useragent: ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36']
-        });
-        console.log('✅ Play-dl đã được khởi tạo!');
-    } catch (error) {
-        console.log('⚠️ Không thể khởi tạo play-dl token, sẽ dùng mặc định');
-    }
-    
     await deployCommands();
     client.user.setActivity('🎵 Nhạc & Thời tiết', { type: 'LISTENING' });
 });
