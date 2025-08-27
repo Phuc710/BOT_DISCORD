@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, demuxProbe } = require('@discordjs/voice');
-const ytdl = require('ytdl-core-discord');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType } = require('@discordjs/voice');
+const ytdl = require('ytdl-core');
 const ytsr = require('ytsr');
 const axios = require('axios');
 const express = require('express');
@@ -165,7 +165,7 @@ async function getWeather(city) {
     }
 }
 
-// Music functions
+// Music functions - FIXED VERSION
 async function playMusic(guild, song) {
     const serverQueue = queue.get(guild.id);
     
@@ -179,68 +179,60 @@ async function playMusic(guild, song) {
     
     try {
         console.log(`🎵 Đang chuẩn bị phát: ${song.title}`);
+        console.log(`🔗 URL: ${song.url}`);
         
-        // Kiểm tra lại URL trước khi phát
-        if (!ytdl.validateURL(song.url)) {
-            throw new Error('URL không hợp lệ!');
-        }
-        
-        // Tạo stream từ ytdl với các options tối ưu
+        // Tạo audio stream với options tối ưu
         const stream = ytdl(song.url, {
             filter: 'audioonly',
-            highWaterMark: 1 << 25,
-            quality: 'highestaudio',
-            requestOptions: {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-            }
+            fmt: 'mp4',
+            highWaterMark: 1 << 62,
+            liveBuffer: 1 << 62,
+            dlChunkSize: 0,
+            bitrate: 128,
+            quality: 'lowestaudio'
         });
-        const probed = await demuxProbe(stream);
-        const resource = createAudioResource(probed.stream, {
-            inputType: probed.type
+
+        // Tạo audio resource
+        const resource = createAudioResource(stream, {
+            inputType: StreamType.Arbitrary,
         });
-        
-        // Set volume
-        resource.volume?.setVolume(0.5);
         
         const player = createAudioPlayer();
         serverQueue.player = player;
         serverQueue.resource = resource;
         
-        player.play(resource);
+        // Subscribe player to connection
         serverQueue.connection.subscribe(player);
         
-        // Player events
+        // Play the resource
+        player.play(resource);
+        
+        console.log('🎵 Đã bắt đầu phát nhạc!');
+        
+        // Player event handlers
         player.on(AudioPlayerStatus.Playing, () => {
-            console.log('✅ Nhạc đang phát!');
+            console.log('✅ Nhạc đang phát successfully!');
         });
         
         player.on(AudioPlayerStatus.Idle, () => {
             console.log('⏭️ Bài hát kết thúc, chuyển bài tiếp theo...');
             serverQueue.songs.shift();
-            setTimeout(() => {
-                playMusic(guild, serverQueue.songs[0]);
-            }, 1000);
+            playMusic(guild, serverQueue.songs[0]);
         });
         
         player.on('error', error => {
             console.error('❌ Player error:', error);
             serverQueue.textChannel?.send(`❌ Lỗi khi phát "${song.title}"! Chuyển bài tiếp theo...`);
             serverQueue.songs.shift();
-            setTimeout(() => {
-                playMusic(guild, serverQueue.songs[0]);
-            }, 2000);
+            playMusic(guild, serverQueue.songs[0]);
         });
         
-        // Xử lý lỗi stream
+        // Stream error handling
         stream.on('error', error => {
             console.error('❌ Stream error:', error);
-            serverQueue.textChannel?.send(`❌ Lỗi stream khi phát "${song.title}"! Chuyển bài tiếp theo...`);
+            serverQueue.textChannel?.send(`❌ Lỗi stream: ${error.message}`);
             serverQueue.songs.shift();
-            setTimeout(() => {
-                playMusic(guild, serverQueue.songs[0]);
-            }, 2000);
+            playMusic(guild, serverQueue.songs[0]);
         });
         
         // Send now playing message
@@ -262,104 +254,82 @@ async function playMusic(guild, song) {
         serverQueue.textChannel?.send({ embeds: [nowPlayingEmbed] });
         
     } catch (error) {
-        console.error('❌ Play error:', error.message);
-        serverQueue?.textChannel?.send(`❌ Không thể phát "${song.title}"! Lỗi: ${error.message}`);
+        console.error('❌ Lỗi phát nhạc:', error);
+        serverQueue?.textChannel?.send(`❌ Không thể phát "${song.title}": ${error.message}`);
         
-        // Thử bài tiếp theo
         serverQueue.songs.shift();
         if (serverQueue.songs.length > 0) {
             setTimeout(() => {
                 playMusic(guild, serverQueue.songs[0]);
             }, 3000);
-        } else {
-            serverQueue?.textChannel?.send('❌ Không có bài nào khác để phát!');
-            if (serverQueue && serverQueue.connection) {
-                serverQueue.connection.destroy();
-            }
-            queue.delete(guild.id);
         }
     }
 }
 
-// Search YouTube
+// Search YouTube - IMPROVED VERSION
 async function searchYouTube(query) {
     try {
         console.log(`🔍 Tìm kiếm: ${query}`);
         
-        // Kiểm tra xem có phải URL YouTube không
+        // Kiểm tra URL YouTube
         if (ytdl.validateURL(query)) {
-            console.log('📺 Đang lấy thông tin video từ URL...');
+            console.log('📺 Lấy thông tin từ URL YouTube...');
+            const info = await ytdl.getBasicInfo(query);
             
-            try {
-                const info = await ytdl.getInfo(query);
-                
-                return {
-                    title: info.videoDetails.title || 'Unknown Title',
-                    url: info.videoDetails.video_url || query,
-                    duration: formatDuration(parseInt(info.videoDetails.lengthSeconds) || 0),
-                    thumbnail: info.videoDetails.thumbnails?.[0]?.url,
-                    channel: info.videoDetails.author?.name || 'Unknown Channel'
-                };
-            } catch (ytdlError) {
-                console.error('❌ ytdl error:', ytdlError.message);
-                
-                // Fallback: Extract video ID and reconstruct URL
-                let videoId = '';
-                if (query.includes('v=')) {
-                    videoId = query.split('v=')[1].split('&')[0];
-                } else if (query.includes('youtu.be/')) {
-                    videoId = query.split('youtu.be/')[1].split('?')[0];
-                }
-                
-                if (videoId) {
-                    const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
-                    const retryInfo = await ytdl.getInfo(cleanUrl);
-                    
-                    return {
-                        title: retryInfo.videoDetails.title || 'Unknown Title',
-                        url: cleanUrl,
-                        duration: formatDuration(parseInt(retryInfo.videoDetails.lengthSeconds) || 0),
-                        thumbnail: retryInfo.videoDetails.thumbnails?.[0]?.url,
-                        channel: retryInfo.videoDetails.author?.name || 'Unknown Channel'
-                    };
-                }
-                throw ytdlError;
-            }
+            return {
+                title: info.videoDetails.title,
+                url: info.videoDetails.video_url,
+                duration: formatDuration(parseInt(info.videoDetails.lengthSeconds)),
+                thumbnail: info.videoDetails.thumbnails?.[0]?.url,
+                channel: info.videoDetails.author?.name
+            };
         } else {
-            // Tìm kiếm theo tên bằng ytsr
-            console.log('🔎 Đang tìm kiếm trên YouTube...');
-            const searchResults = await ytsr(query, { limit: 5 });
+            // Tìm kiếm bằng tên
+            console.log('🔎 Tìm kiếm trên YouTube...');
+            const searchResults = await ytsr(query, { limit: 10 });
             
             if (!searchResults || !searchResults.items || searchResults.items.length === 0) {
-                throw new Error(`Không tìm thấy bài hát nào với từ khóa: "${query}"`);
+                throw new Error(`Không tìm thấy kết quả cho: "${query}"`);
             }
             
-            // Lọc chỉ lấy video (không phải playlist hay channel)
-            const videos = searchResults.items.filter(item => item.type === 'video' && item.duration);
+            // Lọc video
+            const videos = searchResults.items.filter(item => 
+                item.type === 'video' && 
+                item.duration && 
+                item.duration !== 'N/A' &&
+                !item.isLive
+            );
             
             if (videos.length === 0) {
-                throw new Error('Không tìm thấy video nào phù hợp!');
+                throw new Error('Không tìm thấy video phù hợp!');
             }
             
             const video = videos[0];
             console.log(`✅ Tìm thấy: ${video.title}`);
             
+            // Validate URL trước khi return
+            if (!ytdl.validateURL(video.url)) {
+                throw new Error('URL video không hợp lệ!');
+            }
+            
             return {
-                title: video.title || 'Unknown Title',
+                title: video.title,
                 url: video.url,
-                duration: video.duration || 'Unknown',
-                thumbnail: video.bestThumbnail?.url || video.thumbnails?.[0]?.url,
-                channel: video.author?.name || 'Unknown Channel'
+                duration: video.duration,
+                thumbnail: video.bestThumbnail?.url,
+                channel: video.author?.name
             };
         }
     } catch (error) {
-        console.error('❌ Search error:', error.message);
-        throw new Error(`Không thể tìm thấy hoặc phát bài hát này! Lỗi: ${error.message}`);
+        console.error('❌ Lỗi tìm kiếm:', error);
+        throw new Error(`Không thể tìm thấy bài hát: ${error.message}`);
     }
 }
 
 // Format duration helper
 function formatDuration(seconds) {
+    if (!seconds || isNaN(seconds)) return 'N/A';
+    
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
@@ -402,7 +372,7 @@ client.on('guildMemberAdd', async (member) => {
     }
 });
 
-// Slash command interactions
+// Slash command interactions - FIXED VERSION
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     
@@ -424,18 +394,20 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply('❌ Bạn cần vào voice channel trước!');
         }
         
+        const permissions = voiceChannel.permissionsFor(interaction.client.user);
+        if (!permissions.has('CONNECT') || !permissions.has('SPEAK')) {
+            return interaction.reply('❌ Bot không có quyền vào voice channel!');
+        }
+        
         await interaction.deferReply();
         
         try {
-            console.log(`🎯 Đang xử lý: ${query}`);
-            
-            // Hiển thị trạng thái đang tìm kiếm
             await interaction.editReply('🔍 Đang tìm kiếm bài hát...');
             
             const song = await searchYouTube(query);
-            console.log(`✅ Tìm thấy bài hát: ${song.title}`);
+            console.log(`✅ Đã tìm thấy: ${song.title}`);
             
-            const serverQueue = queue.get(interaction.guild.id);
+            let serverQueue = queue.get(interaction.guild.id);
             
             if (!serverQueue) {
                 const queueContruct = {
@@ -463,10 +435,12 @@ client.on('interactionCreate', async (interaction) => {
                     
                     queueContruct.connection = connection;
                     
-                    // Wait for connection to be ready
+                    // Wait for connection ready
                     connection.on(VoiceConnectionStatus.Ready, () => {
-                        console.log('✅ Kết nối voice channel thành công!');
-                        playMusic(interaction.guild, queueContruct.songs[0]);
+                        console.log('✅ Đã kết nối voice channel!');
+                        setTimeout(() => {
+                            playMusic(interaction.guild, queueContruct.songs[0]);
+                        }, 1000);
                     });
                     
                     connection.on(VoiceConnectionStatus.Disconnected, () => {
@@ -476,6 +450,7 @@ client.on('interactionCreate', async (interaction) => {
                     
                     connection.on('error', (error) => {
                         console.error('❌ Connection error:', error);
+                        interaction.followUp('❌ Lỗi kết nối voice channel!');
                         queue.delete(interaction.guild.id);
                     });
                     
@@ -497,7 +472,7 @@ client.on('interactionCreate', async (interaction) => {
                     await interaction.editReply({ content: null, embeds: [embed] });
                     
                 } catch (err) {
-                    console.error('❌ Lỗi kết nối voice:', err);
+                    console.error('❌ Lỗi kết nối:', err);
                     queue.delete(interaction.guild.id);
                     await interaction.editReply('❌ Không thể kết nối voice channel!');
                 }
@@ -528,7 +503,7 @@ client.on('interactionCreate', async (interaction) => {
                     .setTitle('❌ Lỗi')
                     .setDescription(error.message)
                     .addFields(
-                        { name: '💡 Gợi ý', value: 'Hãy thử:\n• Kiểm tra link YouTube có đúng không\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn ở khu vực của bạn' }
+                        { name: '💡 Gợi ý', value: 'Hãy thử:\n• Kiểm tra link YouTube\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn' }
                     )
                     .setColor('#ff0000')]
             });
