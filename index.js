@@ -386,6 +386,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ embeds: [weatherEmbed] });
     }
     
+    // Thay thế toàn bộ khối lệnh 'play' bằng đoạn code này
     else if (commandName === 'play') {
         const query = interaction.options.getString('query');
         const voiceChannel = interaction.member.voice.channel;
@@ -399,84 +400,51 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply('❌ Bot không có quyền vào voice channel!');
         }
         
-        await interaction.deferReply();
+        await interaction.deferReply(); // Chỉ defer một lần
         
         try {
-            await interaction.editReply('🔍 Đang tìm kiếm bài hát...');
-            
             const song = await searchYouTube(query);
-            console.log(`✅ Đã tìm thấy: ${song.title}`);
-            
             let serverQueue = queue.get(interaction.guild.id);
             
+            // Nếu không có hàng đợi, tạo mới và kết nối
             if (!serverQueue) {
-                const queueContruct = {
+                const connection = joinVoiceChannel({
+                    channelId: voiceChannel.id,
+                    guildId: interaction.guild.id,
+                    adapterCreator: interaction.guild.voiceAdapterCreator,
+                });
+
+                serverQueue = {
                     textChannel: interaction.channel,
                     voiceChannel: voiceChannel,
-                    connection: null,
+                    connection: connection,
                     songs: [],
-                    volume: 5,
-                    playing: true,
                     player: null,
-                    resource: null
                 };
+                queue.set(interaction.guild.id, serverQueue);
+                serverQueue.songs.push(song);
                 
-                queue.set(interaction.guild.id, queueContruct);
-                queueContruct.songs.push(song);
+                // Xử lý khi kết nối sẵn sàng
+                connection.on(VoiceConnectionStatus.Ready, () => {
+                    console.log('✅ Đã kết nối voice channel!');
+                    playMusic(interaction.guild, serverQueue.songs[0]);
+                });
+
+                const embed = new EmbedBuilder()
+                    .setTitle('✅ Đã thêm vào hàng đợi')
+                    .setDescription(`**${song.title}**`)
+                    .addFields(
+                        { name: '🎤 Kênh', value: song.channel || 'Không rõ', inline: true },
+                        { name: '⏱️ Thời gian', value: song.duration || 'Không rõ', inline: true },
+                        { name: '📍 Vị trí', value: '#1 (Đang phát)', inline: true }
+                    )
+                    .setColor('#00ff00')
+                    .setTimestamp();
+                if (song.thumbnail) embed.setThumbnail(song.thumbnail);
                 
-                try {
-                    await interaction.editReply('🔗 Đang kết nối voice channel...');
-                    
-                    const connection = joinVoiceChannel({
-                        channelId: voiceChannel.id,
-                        guildId: interaction.guild.id,
-                        adapterCreator: interaction.guild.voiceAdapterCreator,
-                    });
-                    
-                    queueContruct.connection = connection;
-                    
-                    // Wait for connection ready
-                    connection.on(VoiceConnectionStatus.Ready, () => {
-                        console.log('✅ Đã kết nối voice channel!');
-                        setTimeout(() => {
-                            playMusic(interaction.guild, queueContruct.songs[0]);
-                        }, 1000);
-                    });
-                    
-                    connection.on(VoiceConnectionStatus.Disconnected, () => {
-                        console.log('⚠️ Mất kết nối voice channel');
-                        queue.delete(interaction.guild.id);
-                    });
-                    
-                    connection.on('error', (error) => {
-                        console.error('❌ Connection error:', error);
-                        interaction.followUp('❌ Lỗi kết nối voice channel!');
-                        queue.delete(interaction.guild.id);
-                    });
-                    
-                    const embed = new EmbedBuilder()
-                        .setTitle('✅ Đã thêm vào hàng đợi')
-                        .setDescription(`**${song.title}**`)
-                        .addFields(
-                            { name: '🎤 Kênh', value: song.channel || 'Không rõ', inline: true },
-                            { name: '⏱️ Thời gian', value: song.duration || 'Không rõ', inline: true },
-                            { name: '📍 Vị trí', value: '#1 (Đang phát)', inline: true }
-                        )
-                        .setColor('#00ff00')
-                        .setTimestamp();
-                        
-                    if (song.thumbnail) {
-                        embed.setThumbnail(song.thumbnail);
-                    }
-                    
-                    await interaction.editReply({ content: null, embeds: [embed] });
-                    
-                } catch (err) {
-                    console.error('❌ Lỗi kết nối:', err);
-                    queue.delete(interaction.guild.id);
-                    await interaction.editReply('❌ Không thể kết nối voice channel!');
-                }
+                await interaction.editReply({ embeds: [embed] });
             } else {
+                // Nếu có hàng đợi, chỉ thêm bài hát
                 serverQueue.songs.push(song);
                 const embed = new EmbedBuilder()
                     .setTitle('✅ Đã thêm vào hàng đợi')
@@ -488,12 +456,9 @@ client.on('interactionCreate', async (interaction) => {
                     )
                     .setColor('#00ff00')
                     .setTimestamp();
-                    
-                if (song.thumbnail) {
-                    embed.setThumbnail(song.thumbnail);
-                }
+                if (song.thumbnail) embed.setThumbnail(song.thumbnail);
                 
-                await interaction.editReply({ content: null, embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
             }
             
         } catch (error) {
@@ -502,9 +467,7 @@ client.on('interactionCreate', async (interaction) => {
                 embeds: [new EmbedBuilder()
                     .setTitle('❌ Lỗi')
                     .setDescription(error.message)
-                    .addFields(
-                        { name: '💡 Gợi ý', value: 'Hãy thử:\n• Kiểm tra link YouTube\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn' }
-                    )
+                    .addFields({ name: '💡 Gợi ý', value: 'Hãy thử:\n• Kiểm tra link YouTube\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn' })
                     .setColor('#ff0000')]
             });
         }
