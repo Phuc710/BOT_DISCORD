@@ -1,9 +1,11 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, demuxProbe } = require('@discordjs/voice');
 const ytdl = require('ytdl-core');
 const ytsr = require('ytsr');
 const axios = require('axios');
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 // Config từ .env
@@ -13,6 +15,11 @@ const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 const WELCOME_CHANNEL_ID = '💬𝓒𝓱𝓪𝓽';
 const AUTO_ROLE_NAME = '🦄 AKKA LOO';
 const PORT = process.env.PORT || 3000;
+
+// FFmpeg path configuration - Fix path cho Windows
+const FFMPEG_PATH = process.platform === 'win32' 
+    ? path.join(__dirname, 'bin', 'ffmpeg', 'ffmpeg.exe')
+    : 'ffmpeg'; // Linux/Mac sử dụng system ffmpeg
 
 // Express app setup
 const app = express();
@@ -34,7 +41,8 @@ app.get('/', (req, res) => {
         uptime: `${Math.floor(process.uptime())} seconds`,
         timestamp: new Date().toISOString(),
         bot_status: client.isReady() ? 'online' : 'starting...',
-        guilds: client.isReady() ? client.guilds.cache.size : 0
+        guilds: client.isReady() ? client.guilds.cache.size : 0,
+        ffmpeg_status: checkFFmpegAvailable() ? 'available' : 'system'
     });
 });
 
@@ -44,12 +52,9 @@ app.get('/health', (req, res) => {
         bot_status: client.isReady() ? 'online' : 'offline',
         guilds: client.guilds.cache.size,
         uptime: process.uptime(),
-        memory: process.memoryUsage()
+        memory: process.memoryUsage(),
+        ffmpeg_available: checkFFmpegAvailable()
     });
-});
-
-app.get('/ping', (req, res) => {
-    res.send('Pong! 🏓');
 });
 
 // Music queue system
@@ -97,7 +102,11 @@ const commands = [
     
     new SlashCommandBuilder()
         .setName('nowplaying')
-        .setDescription('Xem bài đang phát')
+        .setDescription('Xem bài đang phát'),
+    
+    new SlashCommandBuilder()
+        .setName('ffmpeg')
+        .setDescription('Kiểm tra trạng thái FFmpeg')
 ];
 
 // Register slash commands
@@ -105,7 +114,7 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 async function deployCommands() {
     try {
-        console.log('Đang đăng ký slash commands...');
+        console.log('🔄 Đang đăng ký slash commands...');
         await rest.put(
             Routes.applicationCommands(CLIENT_ID),
             { body: commands }
@@ -114,6 +123,15 @@ async function deployCommands() {
     } catch (error) {
         console.error('❌ Lỗi khi đăng ký commands:', error);
     }
+}
+
+// Check FFmpeg availability - Fixed function
+function checkFFmpegAvailable() {
+    if (process.platform === 'win32') {
+        return fs.existsSync(FFMPEG_PATH);
+    }
+    // For Linux/Mac, assume ffmpeg is available in PATH
+    return true;
 }
 
 // Weather function
@@ -157,7 +175,7 @@ async function getWeather(city) {
             
         return embed;
     } catch (error) {
-        console.error('Lỗi khi lấy thời tiết:', error);
+        console.error('❌ Lỗi khi lấy thời tiết:', error);
         return new EmbedBuilder()
             .setTitle('❌ Lỗi')
             .setDescription('Không thể lấy thông tin thời tiết. Vui lòng kiểm tra tên thành phố!')
@@ -165,7 +183,7 @@ async function getWeather(city) {
     }
 }
 
-// Music functions - FIXED VERSION
+// FIXED Music functions
 async function playMusic(guild, song) {
     const serverQueue = queue.get(guild.id);
     
@@ -179,22 +197,25 @@ async function playMusic(guild, song) {
     
     try {
         console.log(`🎵 Đang chuẩn bị phát: ${song.title}`);
-        console.log(`🔗 URL: ${song.url}`);
         
-        // Tạo audio stream với options tối ưu
+        // Tạo stream với ytdl - Fixed options
         const stream = ytdl(song.url, {
             filter: 'audioonly',
-            fmt: 'mp4',
-            highWaterMark: 1 << 62,
-            liveBuffer: 1 << 62,
-            dlChunkSize: 0,
-            bitrate: 128,
-            quality: 'lowestaudio'
+            quality: 'highestaudio',
+            highWaterMark: 1 << 25,
+            liveBuffer: 1 << 25,
         });
 
-        // Tạo audio resource
-        const resource = createAudioResource(stream, {
-            inputType: StreamType.Arbitrary,
+        // Probe the stream to get its type
+        const { stream: probedStream, type } = await demuxProbe(stream);
+        
+        // Create audio resource với stream đã probe
+        const resource = createAudioResource(probedStream, {
+            inputType: type,
+            metadata: {
+                title: song.title,
+                url: song.url
+            }
         });
         
         const player = createAudioPlayer();
@@ -209,7 +230,7 @@ async function playMusic(guild, song) {
         
         console.log('🎵 Đã bắt đầu phát nhạc!');
         
-        // Player event handlers
+        // Player event handlers - Fixed
         player.on(AudioPlayerStatus.Playing, () => {
             console.log('✅ Nhạc đang phát successfully!');
         });
@@ -217,22 +238,18 @@ async function playMusic(guild, song) {
         player.on(AudioPlayerStatus.Idle, () => {
             console.log('⏭️ Bài hát kết thúc, chuyển bài tiếp theo...');
             serverQueue.songs.shift();
-            playMusic(guild, serverQueue.songs[0]);
+            setTimeout(() => {
+                playMusic(guild, serverQueue.songs[0]);
+            }, 500);
         });
         
         player.on('error', error => {
             console.error('❌ Player error:', error);
             serverQueue.textChannel?.send(`❌ Lỗi khi phát "${song.title}"! Chuyển bài tiếp theo...`);
             serverQueue.songs.shift();
-            playMusic(guild, serverQueue.songs[0]);
-        });
-        
-        // Stream error handling
-        stream.on('error', error => {
-            console.error('❌ Stream error:', error);
-            serverQueue.textChannel?.send(`❌ Lỗi stream: ${error.message}`);
-            serverQueue.songs.shift();
-            playMusic(guild, serverQueue.songs[0]);
+            setTimeout(() => {
+                playMusic(guild, serverQueue.songs[0]);
+            }, 1000);
         });
         
         // Send now playing message
@@ -266,12 +283,11 @@ async function playMusic(guild, song) {
     }
 }
 
-// Search YouTube - IMPROVED VERSION
+// Search YouTube function - Fixed
 async function searchYouTube(query) {
     try {
         console.log(`🔍 Tìm kiếm: ${query}`);
         
-        // Kiểm tra URL YouTube
         if (ytdl.validateURL(query)) {
             console.log('📺 Lấy thông tin từ URL YouTube...');
             const info = await ytdl.getBasicInfo(query);
@@ -284,15 +300,13 @@ async function searchYouTube(query) {
                 channel: info.videoDetails.author?.name
             };
         } else {
-            // Tìm kiếm bằng tên
             console.log('🔎 Tìm kiếm trên YouTube...');
-            const searchResults = await ytsr(query, { limit: 10 });
+            const searchResults = await ytsr(query, { limit: 1 });
             
             if (!searchResults || !searchResults.items || searchResults.items.length === 0) {
                 throw new Error(`Không tìm thấy kết quả cho: "${query}"`);
             }
             
-            // Lọc video
             const videos = searchResults.items.filter(item => 
                 item.type === 'video' && 
                 item.duration && 
@@ -306,11 +320,6 @@ async function searchYouTube(query) {
             
             const video = videos[0];
             console.log(`✅ Tìm thấy: ${video.title}`);
-            
-            // Validate URL trước khi return
-            if (!ytdl.validateURL(video.url)) {
-                throw new Error('URL video không hợp lệ!');
-            }
             
             return {
                 title: video.title,
@@ -344,7 +353,12 @@ function formatDuration(seconds) {
 client.once('ready', async () => {
     console.log(`✅ Bot đã online: ${client.user.tag}`);
     await deployCommands();
-    client.user.setActivity('🎵 Nhạc & Thời tiết', { type: 'LISTENING' });
+    
+    // Set activity - Fixed deprecated method
+    client.user.setPresence({
+        activities: [{ name: '🎵 Nhạc & Thời tiết', type: 2 }], // Type 2 = LISTENING
+        status: 'online',
+    });
 });
 
 // Auto role when member joins
@@ -356,7 +370,10 @@ client.on('guildMemberAdd', async (member) => {
             console.log(`✅ Đã thêm role "${AUTO_ROLE_NAME}" cho ${member.user.tag}`);
         }
         
-        const welcomeChannel = member.guild.channels.cache.find(ch => ch.name.includes('chat') || ch.name.includes('💬'));
+        const welcomeChannel = member.guild.channels.cache.find(ch => 
+            ch.name.includes('chat') || ch.name.includes('💬')
+        );
+        
         if (welcomeChannel) {
             const embed = new EmbedBuilder()
                 .setTitle('🎉 Chào mừng thành viên mới!')
@@ -368,11 +385,11 @@ client.on('guildMemberAdd', async (member) => {
             welcomeChannel.send({ embeds: [embed] });
         }
     } catch (error) {
-        console.error('Lỗi khi xử lý thành viên mới:', error);
+        console.error('❌ Lỗi khi xử lý thành viên mới:', error);
     }
 });
 
-// Slash command interactions - FIXED VERSION
+// Slash command interactions
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     
@@ -386,7 +403,22 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ embeds: [weatherEmbed] });
     }
     
-    // Thay thế toàn bộ khối lệnh 'play' bằng đoạn code này
+    else if (commandName === 'ffmpeg') {
+        const isAvailable = checkFFmpegAvailable();
+        const embed = new EmbedBuilder()
+            .setTitle('🎛️ Trạng thái FFmpeg')
+            .setColor(isAvailable ? '#00ff00' : '#ff0000')
+            .addFields(
+                { name: 'Platform', value: process.platform, inline: true },
+                { name: 'FFmpeg Status', value: isAvailable ? '✅ Khả dụng' : '❌ Kiểm tra cài đặt', inline: true },
+                { name: 'Path', value: FFMPEG_PATH, inline: false }
+            )
+            .setFooter({ text: 'FFmpeg được sử dụng để xử lý âm thanh' })
+            .setTimestamp();
+        
+        await interaction.reply({ embeds: [embed] });
+    }
+    
     else if (commandName === 'play') {
         const query = interaction.options.getString('query');
         const voiceChannel = interaction.member.voice.channel;
@@ -395,18 +427,18 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply('❌ Bạn cần vào voice channel trước!');
         }
         
+        // Fixed permission check
         const permissions = voiceChannel.permissionsFor(interaction.client.user);
-        if (!permissions.has('CONNECT') || !permissions.has('SPEAK')) {
+        if (!permissions.has(['Connect', 'Speak'])) {
             return interaction.reply('❌ Bot không có quyền vào voice channel!');
         }
         
-        await interaction.deferReply(); // Chỉ defer một lần
+        await interaction.deferReply();
         
         try {
             const song = await searchYouTube(query);
             let serverQueue = queue.get(interaction.guild.id);
             
-            // Nếu không có hàng đợi, tạo mới và kết nối
             if (!serverQueue) {
                 const connection = joinVoiceChannel({
                     channelId: voiceChannel.id,
@@ -424,14 +456,18 @@ client.on('interactionCreate', async (interaction) => {
                 queue.set(interaction.guild.id, serverQueue);
                 serverQueue.songs.push(song);
                 
-                // Xử lý khi kết nối sẵn sàng
+                // Wait for connection to be ready
                 connection.on(VoiceConnectionStatus.Ready, () => {
                     console.log('✅ Đã kết nối voice channel!');
-                    playMusic(interaction.guild, serverQueue.songs[0]);
+                });
+
+                connection.on(VoiceConnectionStatus.Disconnected, () => {
+                    console.log('⚠️ Đã mất kết nối voice channel');
+                    queue.delete(interaction.guild.id);
                 });
 
                 const embed = new EmbedBuilder()
-                    .setTitle('✅ Đã thêm vào hàng đợi')
+                    .setTitle('✅ Bắt đầu phát')
                     .setDescription(`**${song.title}**`)
                     .addFields(
                         { name: '🎤 Kênh', value: song.channel || 'Không rõ', inline: true },
@@ -443,8 +479,13 @@ client.on('interactionCreate', async (interaction) => {
                 if (song.thumbnail) embed.setThumbnail(song.thumbnail);
                 
                 await interaction.editReply({ embeds: [embed] });
+                
+                // Start playing after a short delay
+                setTimeout(() => {
+                    playMusic(interaction.guild, serverQueue.songs[0]);
+                }, 1000);
+                
             } else {
-                // Nếu có hàng đợi, chỉ thêm bài hát
                 serverQueue.songs.push(song);
                 const embed = new EmbedBuilder()
                     .setTitle('✅ Đã thêm vào hàng đợi')
@@ -467,7 +508,10 @@ client.on('interactionCreate', async (interaction) => {
                 embeds: [new EmbedBuilder()
                     .setTitle('❌ Lỗi')
                     .setDescription(error.message)
-                    .addFields({ name: '💡 Gợi ý', value: 'Hãy thử:\n• Kiểm tra link YouTube\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn' })
+                    .addFields({ 
+                        name: '💡 Gợi ý', 
+                        value: 'Hãy thử:\n• Kiểm tra link YouTube\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn' 
+                    })
                     .setColor('#ff0000')]
             });
         }
@@ -500,7 +544,7 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply('❌ Không có nhạc nào đang phát!');
         }
         
-        serverQueue.player.stop();
+        serverQueue.player.stop(); // This will trigger the idle event and play next song
         await interaction.reply('⏭️ Đã bỏ qua bài hiện tại!');
     }
     
@@ -591,28 +635,30 @@ client.on('error', (error) => {
     console.error('❌ Client error:', error);
 });
 
-client.on('disconnect', () => {
-    console.log('⚠️ Bot disconnected, attempting reconnect...');
-});
-
-client.on('reconnecting', () => {
-    console.log('🔄 Bot reconnecting...');
-});
-
 // Keep alive function
 function keepAlive() {
     setInterval(() => {
         console.log('💚 Bot is alive! ' + new Date().toLocaleString('vi-VN'));
+        console.log(`🎛️ FFmpeg Status: ${checkFFmpegAvailable() ? 'Available' : 'System'}`);
+        console.log(`🎵 Active queues: ${queue.size}`);
     }, 5 * 60 * 1000); // 5 phút
 }
 
-// Anti-crash
+// Anti-crash - Enhanced
 process.on('unhandledRejection', (reason, promise) => {
     console.log('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 process.on('uncaughtException', (err) => {
     console.log('❌ Uncaught Exception:', err);
+    // Don't exit on uncaught exceptions in production
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('🛑 Received SIGINT. Gracefully shutting down...');
+    client.destroy();
+    process.exit(0);
 });
 
 // Start HTTP Server
@@ -620,7 +666,7 @@ app.listen(PORT, () => {
     console.log(`🌐 HTTP Server đang chạy trên port ${PORT}`);
 });
 
-// Login với retry
+// Login với retry - Enhanced
 async function login() {
     try {
         await client.login(DISCORD_TOKEN);
@@ -628,8 +674,13 @@ async function login() {
         console.log('✅ Bot đã login thành công!');
     } catch (error) {
         console.error('❌ Lỗi login:', error);
-        setTimeout(login, 5000); // Retry sau 5s
+        console.log('🔄 Thử lại sau 10 giây...');
+        setTimeout(login, 10000); // Retry sau 10s
     }
 }
 
+// Khởi động bot
+console.log('🚀 Đang khởi động Discord Music Bot...');
+console.log(`🎛️ Platform: ${process.platform}`);
+console.log(`🎛️ FFmpeg Available: ${checkFFmpegAvailable()}`);
 login();

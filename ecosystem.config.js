@@ -1,7 +1,7 @@
 module.exports = {
   apps: [{
     name: 'discord-bot',
-    script: 'bot.js',
+    script: 'index.js',
     watch: false,
     max_memory_restart: '1G',
     env: {
