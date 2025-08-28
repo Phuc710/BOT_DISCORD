@@ -183,7 +183,7 @@ async function getWeather(city) {
     }
 }
 
-// FIXED Music functions
+// FIXED Music functions with better error handling
 async function playMusic(guild, song) {
     const serverQueue = queue.get(guild.id);
     
@@ -198,13 +198,51 @@ async function playMusic(guild, song) {
     try {
         console.log(`🎵 Đang chuẩn bị phát: ${song.title}`);
         
-        // Tạo stream với ytdl - Fixed options
-        const stream = ytdl(song.url, {
+        // Enhanced ytdl options to handle 410 errors
+        const ytdlOptions = {
             filter: 'audioonly',
             quality: 'highestaudio',
             highWaterMark: 1 << 25,
             liveBuffer: 1 << 25,
-        });
+            requestOptions: {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            }
+        };
+
+        // Validate URL again before creating stream
+        if (!ytdl.validateURL(song.url)) {
+            throw new Error('URL không hợp lệ hoặc video không khả dụng');
+        }
+
+        // Check if video is available
+        const info = await ytdl.getBasicInfo(song.url);
+        if (info.videoDetails.isLiveContent) {
+            throw new Error('Không thể phát livestream');
+        }
+
+        // Create stream with retry mechanism
+        let stream;
+        let retryCount = 0;
+        const maxRetries = 3;
+        
+        while (retryCount < maxRetries) {
+            try {
+                stream = ytdl(song.url, ytdlOptions);
+                break;
+            } catch (err) {
+                retryCount++;
+                console.log(`⚠️ Lần thử ${retryCount}/${maxRetries} thất bại: ${err.message}`);
+                
+                if (retryCount >= maxRetries) {
+                    throw new Error(`Không thể tạo stream sau ${maxRetries} lần thử: ${err.message}`);
+                }
+                
+                // Wait before retry
+                await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+            }
+        }
 
         // Probe the stream to get its type
         const { stream: probedStream, type } = await demuxProbe(stream);
@@ -283,56 +321,118 @@ async function playMusic(guild, song) {
     }
 }
 
-// Search YouTube function - Fixed
+// Search YouTube function - Enhanced with fallback
 async function searchYouTube(query) {
     try {
         console.log(`🔍 Tìm kiếm: ${query}`);
         
         if (ytdl.validateURL(query)) {
             console.log('📺 Lấy thông tin từ URL YouTube...');
-            const info = await ytdl.getBasicInfo(query);
             
-            return {
-                title: info.videoDetails.title,
-                url: info.videoDetails.video_url,
-                duration: formatDuration(parseInt(info.videoDetails.lengthSeconds)),
-                thumbnail: info.videoDetails.thumbnails?.[0]?.url,
-                channel: info.videoDetails.author?.name
-            };
+            // Check if video is available first
+            try {
+                const info = await ytdl.getBasicInfo(query);
+                
+                // Check for restrictions
+                if (info.videoDetails.isPrivate) {
+                    throw new Error('Video này là private');
+                }
+                
+                if (info.videoDetails.isLiveContent) {
+                    throw new Error('Không thể phát livestream');
+                }
+                
+                // Check if video is available in region
+                if (info.videoDetails.lengthSeconds === '0') {
+                    throw new Error('Video không khả dụng hoặc bị hạn chế');
+                }
+                
+                return {
+                    title: info.videoDetails.title,
+                    url: info.videoDetails.video_url,
+                    duration: formatDuration(parseInt(info.videoDetails.lengthSeconds)),
+                    thumbnail: info.videoDetails.thumbnails?.[0]?.url,
+                    channel: info.videoDetails.author?.name
+                };
+                
+            } catch (error) {
+                if (error.message.includes('410') || error.message.includes('Not available')) {
+                    // Try to search for the same video by title
+                    console.log('⚠️ Video không khả dụng trực tiếp, thử tìm kiếm thay thế...');
+                    
+                    // Extract video title from URL if possible
+                    const urlTitle = query.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
+                    if (urlTitle) {
+                        // Search for alternative
+                        return await searchByTitle(info.videoDetails.title || query);
+                    }
+                }
+                throw error;
+            }
         } else {
-            console.log('🔎 Tìm kiếm trên YouTube...');
-            const searchResults = await ytsr(query, { limit: 1 });
-            
-            if (!searchResults || !searchResults.items || searchResults.items.length === 0) {
-                throw new Error(`Không tìm thấy kết quả cho: "${query}"`);
-            }
-            
-            const videos = searchResults.items.filter(item => 
-                item.type === 'video' && 
-                item.duration && 
-                item.duration !== 'N/A' &&
-                !item.isLive
-            );
-            
-            if (videos.length === 0) {
-                throw new Error('Không tìm thấy video phù hợp!');
-            }
-            
-            const video = videos[0];
-            console.log(`✅ Tìm thấy: ${video.title}`);
-            
-            return {
-                title: video.title,
-                url: video.url,
-                duration: video.duration,
-                thumbnail: video.bestThumbnail?.url,
-                channel: video.author?.name
-            };
+            return await searchByTitle(query);
         }
     } catch (error) {
         console.error('❌ Lỗi tìm kiếm:', error);
         throw new Error(`Không thể tìm thấy bài hát: ${error.message}`);
     }
+}
+
+// Helper function to search by title
+async function searchByTitle(query) {
+    console.log('🔎 Tìm kiếm trên YouTube...');
+    
+    const searchResults = await ytsr(query, { 
+        limit: 5, // Increase limit to have more options
+        safeSearch: false 
+    });
+    
+    if (!searchResults || !searchResults.items || searchResults.items.length === 0) {
+        throw new Error(`Không tìm thấy kết quả cho: "${query}"`);
+    }
+    
+    const videos = searchResults.items.filter(item => 
+        item.type === 'video' && 
+        item.duration && 
+        item.duration !== 'N/A' &&
+        !item.isLive &&
+        item.url && 
+        ytdl.validateURL(item.url)
+    );
+    
+    if (videos.length === 0) {
+        throw new Error('Không tìm thấy video phù hợp!');
+    }
+    
+    // Try each video until we find one that works
+    for (const video of videos) {
+        try {
+            console.log(`🔍 Thử video: ${video.title}`);
+            
+            // Quick check if video is available
+            const info = await ytdl.getBasicInfo(video.url);
+            
+            if (!info.videoDetails.isPrivate && 
+                !info.videoDetails.isLiveContent && 
+                info.videoDetails.lengthSeconds !== '0') {
+                
+                console.log(`✅ Tìm thấy: ${video.title}`);
+                
+                return {
+                    title: video.title,
+                    url: video.url,
+                    duration: video.duration,
+                    thumbnail: video.bestThumbnail?.url,
+                    channel: video.author?.name
+                };
+            }
+        } catch (err) {
+            console.log(`⚠️ Video không khả dụng: ${video.title}, thử video tiếp theo...`);
+            continue;
+        }
+    }
+    
+    throw new Error('Tất cả video tìm thấy đều không khả dụng');
 }
 
 // Format duration helper
@@ -419,7 +519,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ embeds: [embed] });
     }
     
-    else if (commandName === 'play') {
+        else if (commandName === 'play') {
         const query = interaction.options.getString('query');
         const voiceChannel = interaction.member.voice.channel;
         
@@ -436,7 +536,38 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply();
         
         try {
-            const song = await searchYouTube(query);
+            // Enhanced search with better error handling
+            let song;
+            try {
+                song = await searchYouTube(query);
+            } catch (searchError) {
+                // If direct search fails, try alternative search terms
+                if (searchError.message.includes('410') || searchError.message.includes('Not available')) {
+                    const alternatives = [
+                        query + ' official',
+                        query + ' mv',
+                        query.replace(/ft\.|feat\./, 'featuring'),
+                        query.split(' ')[0] + ' ' + query.split(' ')[1] // First two words only
+                    ];
+                    
+                    for (const alt of alternatives) {
+                        try {
+                            console.log(`🔄 Thử tìm kiếm thay thế: ${alt}`);
+                            song = await searchYouTube(alt);
+                            break;
+                        } catch (altError) {
+                            continue;
+                        }
+                    }
+                    
+                    if (!song) {
+                        throw new Error('Không tìm thấy video nào khả dụng. Video có thể bị chặn hoặc hạn chế địa lý.');
+                    }
+                } else {
+                    throw searchError;
+                }
+            }
+            
             let serverQueue = queue.get(interaction.guild.id);
             
             if (!serverQueue) {
@@ -504,13 +635,38 @@ client.on('interactionCreate', async (interaction) => {
             
         } catch (error) {
             console.error('❌ Play command error:', error);
+            
+            let errorMessage = error.message;
+            let suggestions = [];
+            
+            if (error.message.includes('410')) {
+                errorMessage = 'Video không khả dụng (có thể bị chặn hoặc hạn chế địa lý)';
+                suggestions = [
+                    '• Thử tìm kiếm bằng tên bài hát thay vì link',
+                    '• Thử từ khóa khác (VD: "Hãy trao cho anh Sơn Tùng")',
+                    '• Video có thể bị chặn ở Việt Nam'
+                ];
+            } else if (error.message.includes('private')) {
+                errorMessage = 'Video này là private hoặc đã bị xóa';
+                suggestions = ['• Thử tìm kiếm bản khác của bài hát'];
+            } else if (error.message.includes('livestream')) {
+                errorMessage = 'Không thể phát livestream';
+                suggestions = ['• Bot chỉ phát được video đã ghi sẵn'];
+            } else {
+                suggestions = [
+                    '• Kiểm tra link YouTube',
+                    '• Thử tìm kiếm bằng tên bài hát',
+                    '• Đảm bảo video không bị chặn'
+                ];
+            }
+            
             await interaction.editReply({
                 embeds: [new EmbedBuilder()
-                    .setTitle('❌ Lỗi')
-                    .setDescription(error.message)
+                    .setTitle('❌ Không thể phát nhạc')
+                    .setDescription(errorMessage)
                     .addFields({ 
                         name: '💡 Gợi ý', 
-                        value: 'Hãy thử:\n• Kiểm tra link YouTube\n• Thử tìm kiếm bằng tên bài hát\n• Đảm bảo video không bị chặn' 
+                        value: suggestions.join('\n') || 'Vui lòng thử lại sau'
                     })
                     .setColor('#ff0000')]
             });
