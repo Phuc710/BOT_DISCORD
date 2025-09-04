@@ -1,0 +1,8 @@
+services:
+  - type: worker
+    name: discord-music-bot
+    env: python
+    plan: free   # hoặc starter nếu muốn chạy 24/7 thật sự
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python MusicBot.py"
+    autoDeploy: true
